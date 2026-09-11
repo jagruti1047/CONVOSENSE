@@ -1,8 +1,9 @@
-
 import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from datetime import datetime
+import time
 
 
 # =========================================================
@@ -10,1408 +11,1986 @@ import matplotlib.pyplot as plt
 # =========================================================
 
 st.set_page_config(
-    page_title="Conveyor Predictive Maintenance",
+    page_title="ConvoSense | Intelligent Conveyor Health",
     page_icon="⚙️",
     layout="wide"
 )
 
-st.title("⚙️ Intelligent Conveyor Belt Health & Predictive Maintenance")
+st.title("⚙️ ConvoSense — Intelligent Conveyor Belt Health Monitoring")
+st.caption(
+    "Simulation-based conveyor monitoring, visual belt tracking, "
+    "multi-sensor analysis and predictive maintenance assessment"
+)
+
+
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+NORMAL_VIBRATION = 2.0       # mm/s
+NORMAL_RPM = 1000.0          # RPM
+NORMAL_CURRENT = 8.0         # A
+NORMAL_LOAD = 100.0          # kg
+
+VIBRATION_WARNING = 4.0
+CURRENT_WARNING = 12.0
+LOAD_WARNING = 80.0
+
+CAMERA_WARNING = 10.0        # %
+CAMERA_CRITICAL = 20.0       # %
+
+CAMERA_INTERVAL = 3
+
+# Sensor health weights
+W_VIBRATION = 0.35
+W_RPM = 0.20
+W_CURRENT = 0.25
+W_LOAD = 0.20
+
+# Multimodal fusion weights
+SENSOR_FUSION_WEIGHT = 0.80
+CAMERA_FUSION_WEIGHT = 0.20
+
+
+# =========================================================
+# SESSION STATE
+# =========================================================
+
+if "camera_count" not in st.session_state:
+    st.session_state.camera_count = 0
+
+if "camera_history" not in st.session_state:
+    st.session_state.camera_history = []
+
+if "motion_offset" not in st.session_state:
+    st.session_state.motion_offset = 0
+
+if "sensor_history" not in st.session_state:
+    st.session_state.sensor_history = []
+
+
+# =========================================================
+# HELPER FUNCTIONS
+# =========================================================
+
+def clamp(value, low=0, high=100):
+    return max(low, min(high, value))
+
+
+def vibration_health(v):
+    """
+    Reference:
+    2 mm/s = healthy baseline.
+    Increasing vibration progressively reduces health.
+    """
+    health = 100 - ((v / NORMAL_VIBRATION) - 1) * 50
+    return clamp(health)
+
+
+def rpm_health(rpm):
+    deviation = abs(rpm - NORMAL_RPM) / NORMAL_RPM * 100
+    return clamp(100 - deviation)
+
+
+def current_health(current):
+    health = 100 - ((current / NORMAL_CURRENT) - 1) * 50
+    return clamp(health)
+
+
+def load_health(load):
+    utilization = load / NORMAL_LOAD * 100
+    health = 100 - utilization * 0.50
+    return clamp(health)
+
+
+def vibration_status(v):
+    if v <= VIBRATION_WARNING:
+        return "NORMAL"
+    elif v <= 7:
+        return "WARNING"
+    else:
+        return "CRITICAL"
+
+
+def rpm_status(rpm):
+    deviation = abs(rpm - NORMAL_RPM) / NORMAL_RPM * 100
+
+    if deviation <= 5:
+        return "NORMAL"
+    elif deviation <= 15:
+        return "WARNING"
+    else:
+        return "CRITICAL"
+
+
+def current_status(current):
+    if current <= CURRENT_WARNING:
+        return "NORMAL"
+    elif current <= 16:
+        return "WARNING"
+    else:
+        return "CRITICAL"
+
+
+def load_status(load):
+    if load <= LOAD_WARNING:
+        return "NORMAL"
+    elif load <= 95:
+        return "WARNING"
+    else:
+        return "CRITICAL"
+
+
+def status_color(status):
+    if status == "NORMAL":
+        return "green"
+    elif status == "WARNING":
+        return "orange"
+    return "red"
+
+
+# =========================================================
+# CAMERA SIMULATION
+# =========================================================
+
+def get_camera_deviation():
+    """Generate an independent simulated camera tracking measurement."""
+    # Smooth, bounded belt-centerline movement for the 3-second camera refresh.
+    sequence = [0, 2, -3, 4, -2, 1, 5, -4, 3, -1, 0, 2, -2, 1]
+    index = st.session_state.camera_count % len(sequence)
+    return sequence[index]
+
+
+def camera_classification(deviation):
+
+    abs_dev = abs(deviation)
+
+    if abs_dev <= CAMERA_WARNING:
+        classification = "NORMAL"
+    elif abs_dev <= CAMERA_CRITICAL:
+        classification = "WARNING"
+    else:
+        classification = "CRITICAL"
+
+    if deviation > 3:
+        direction = "RIGHT"
+    elif deviation < -3:
+        direction = "LEFT"
+    else:
+        direction = "CENTERED"
+
+    if classification == "NORMAL":
+        visual_health = 100 - abs_dev * 1.5
+    else:
+        visual_health = 100 - abs_dev * 2.0
+
+    visual_health = clamp(visual_health)
+
+    return classification, direction, visual_health
+
+
+# =========================================================
+# MOVING CONVEYOR IMAGE
+# =========================================================
+
+def create_moving_conveyor_frame(deviation, capture_number):
+
+    width = 1100
+    height = 620
+
+    fig, ax = plt.subplots(figsize=(14, 8))
+
+    ax.set_xlim(0, width)
+    ax.set_ylim(0, height)
+    ax.axis("off")
+
+    # -----------------------------------------------------
+    # BACKGROUND
+    # -----------------------------------------------------
+
+    ax.set_facecolor("#dfe3e6")
+
+    # Industrial floor
+    ax.add_patch(
+        plt.Rectangle(
+            (0, 0),
+            width,
+            height,
+            facecolor="#dfe3e6"
+        )
+    )
+
+    # -----------------------------------------------------
+    # STRUCTURAL FRAME
+    # -----------------------------------------------------
+
+    frame_y = 100
+    frame_height = 420
+
+    ax.add_patch(
+        plt.Rectangle(
+            (120, frame_y),
+            860,
+            frame_height,
+            fill=False,
+            linewidth=16
+        )
+    )
+
+    # Cross supports
+    for x in [220, 420, 620, 820]:
+
+        ax.plot(
+            [x, x],
+            [100, 520],
+            linewidth=8
+        )
+
+    # -----------------------------------------------------
+    # CONVEYOR BELT
+    # -----------------------------------------------------
+
+    belt_width = 650
+    belt_height = 300
+
+    base_center_x = width / 2
+
+    belt_shift = deviation * 6
+
+    belt_center_x = base_center_x + belt_shift
+
+    belt_left = belt_center_x - belt_width / 2
+    belt_bottom = 160
+
+    # Belt body
+    ax.add_patch(
+        plt.Rectangle(
+            (belt_left, belt_bottom),
+            belt_width,
+            belt_height,
+            facecolor="#151515",
+            edgecolor="black",
+            linewidth=5
+        )
+    )
+
+    # -----------------------------------------------------
+    # YELLOW TRACKING STRIPES
+    # -----------------------------------------------------
+
+    stripe_width = 14
+
+    ax.add_patch(
+        plt.Rectangle(
+            (
+                belt_left + 20,
+                belt_bottom + 8
+            ),
+            stripe_width,
+            belt_height - 16,
+            facecolor="#f2c500"
+        )
+    )
+
+    ax.add_patch(
+        plt.Rectangle(
+            (
+                belt_left + belt_width - 34,
+                belt_bottom + 8
+            ),
+            stripe_width,
+            belt_height - 16,
+            facecolor="#f2c500"
+        )
+    )
+
+    # -----------------------------------------------------
+    # MOVING BELT TREAD
+    # -----------------------------------------------------
+
+    motion = st.session_state.motion_offset
+
+    for x in np.arange(
+        belt_left + 60,
+        belt_left + belt_width - 30,
+        45
+    ):
+
+        shifted_x = x + (motion % 45)
+
+        if shifted_x > belt_left + belt_width - 30:
+            shifted_x -= belt_width - 90
+
+        ax.plot(
+            [shifted_x, shifted_x],
+            [belt_bottom + 25, belt_bottom + belt_height - 25],
+            linewidth=2,
+            alpha=0.35
+        )
+
+    # -----------------------------------------------------
+    # IRON ORE / MATERIAL MOVEMENT
+    # -----------------------------------------------------
+
+    rng = np.random.default_rng(100 + capture_number)
+
+    for i in range(35):
+
+        x = rng.uniform(
+            belt_left + 50,
+            belt_left + belt_width - 50
+        )
+
+        base_y = rng.uniform(
+            belt_bottom + 30,
+            belt_bottom + belt_height - 30
+        )
+
+        moving_x = (
+            x +
+            (motion * 1.8) % (belt_width - 100)
+        )
+
+        if moving_x > belt_left + belt_width - 50:
+            moving_x -= belt_width - 100
+
+        size = rng.uniform(5, 13)
+
+        ax.scatter(
+            moving_x,
+            base_y,
+            s=size * 7,
+            alpha=0.8
+        )
+
+    # -----------------------------------------------------
+    # REFERENCE CENTERLINE
+    # -----------------------------------------------------
+
+    reference_x = base_center_x
+
+    ax.plot(
+        [reference_x, reference_x],
+        [120, 500],
+        linestyle="--",
+        linewidth=3,
+        label="Reference Centerline"
+    )
+
+    # -----------------------------------------------------
+    # DETECTED BELT CENTERLINE
+    # -----------------------------------------------------
+
+    detected_x = belt_center_x
+
+    ax.plot(
+        [detected_x, detected_x],
+        [120, 500],
+        linestyle="-",
+        linewidth=4,
+        label="Detected Belt Centerline"
+    )
+
+    # -----------------------------------------------------
+    # DEVIATION ARROW
+    # -----------------------------------------------------
+
+    ax.annotate(
+        "",
+        xy=(detected_x, 540),
+        xytext=(reference_x, 540),
+        arrowprops=dict(
+            arrowstyle="<->",
+            linewidth=3
+        )
+    )
+
+    ax.text(
+        (reference_x + detected_x) / 2,
+        550,
+        f"Deviation = {abs(deviation):.1f}%",
+        ha="center",
+        fontsize=12,
+        fontweight="bold"
+    )
+
+    # -----------------------------------------------------
+    # CAMERA INSPECTION ZONE
+    # -----------------------------------------------------
+
+    zone_width = 420
+    zone_height = 230
+
+    zone_left = base_center_x - zone_width / 2
+    zone_bottom = 195
+
+    ax.add_patch(
+        plt.Rectangle(
+            (
+                zone_left,
+                zone_bottom
+            ),
+            zone_width,
+            zone_height,
+            fill=False,
+            linestyle="--",
+            linewidth=3
+        )
+    )
+
+    ax.text(
+        base_center_x,
+        zone_bottom + zone_height + 10,
+        "CAMERA INSPECTION ZONE",
+        ha="center",
+        fontsize=11,
+        fontweight="bold"
+    )
+
+    # -----------------------------------------------------
+    # OVERHEAD CAMERA
+    # -----------------------------------------------------
+
+    camera_x = base_center_x
+    camera_y = 575
+
+    ax.add_patch(
+        plt.Rectangle(
+            (
+                camera_x - 55,
+                camera_y - 30
+            ),
+            110,
+            45,
+            facecolor="#30343b",
+            edgecolor="black",
+            linewidth=2
+        )
+    )
+
+    # Camera lens
+    ax.scatter(
+        camera_x,
+        camera_y - 8,
+        s=130,
+        marker="o"
+    )
+
+    # Blue indicator
+    ax.scatter(
+        camera_x + 40,
+        camera_y - 8,
+        s=50,
+        marker="o"
+    )
+
+    # Light cone
+    ax.fill(
+        [
+            camera_x - 30,
+            camera_x + 30,
+            camera_x + 190,
+            camera_x - 190
+        ],
+        [
+            camera_y - 35,
+            camera_y - 35,
+            360,
+            360
+        ],
+        alpha=0.08
+    )
+
+    # -----------------------------------------------------
+    # LABELS
+    # -----------------------------------------------------
+
+    ax.text(
+        30,
+        590,
+        "CONVOSENSE — LIVE CONVEYOR VISUAL MONITORING",
+        fontsize=16,
+        fontweight="bold"
+    )
+
+    ax.text(
+        30,
+        40,
+        "Simulated overhead camera inspection",
+        fontsize=10
+    )
+
+    ax.text(
+        width - 30,
+        40,
+        f"CAPTURE #{capture_number}",
+        fontsize=11,
+        ha="right",
+        fontweight="bold"
+    )
+
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.01),
+        ncol=2
+    )
+
+    plt.tight_layout()
+
+    return fig
+
+
+# =========================================================
+# SIDEBAR
+# =========================================================
+
+st.sidebar.header("📡 Live Sensor Controls")
+
+# =========================================================
+# SENSOR INPUTS
+# =========================================================
+
+st.sidebar.subheader("📡 Live Sensor Inputs")
+
+manual_vibration = st.sidebar.slider(
+    "Vibration (mm/s)",
+    0.0,
+    12.0,
+    NORMAL_VIBRATION,
+    0.1
+)
+
+manual_rpm = st.sidebar.slider(
+    "RPM",
+    500.0,
+    1200.0,
+    NORMAL_RPM,
+    10.0
+)
+
+manual_current = st.sidebar.slider(
+    "Motor Current (A)",
+    0.0,
+    20.0,
+    NORMAL_CURRENT,
+    0.1
+)
+
+manual_load = st.sidebar.slider(
+    "Load (kg)",
+    0.0,
+    NORMAL_LOAD,
+    50.0,
+    1.0
+)
+
+if st.sidebar.button("🔄 Clear History"):
+    st.session_state.camera_history = []
+    st.session_state.sensor_history = []
+    st.session_state.camera_count = 0
+    st.session_state.motion_offset = 0
+
+
+# =========================================================
+# LIVE SENSOR VALUES
+# =========================================================
+
+# The dashboard uses the values entered in the sidebar directly.
+# There is no live_inputs override.
+
+vibration = manual_vibration
+rpm = manual_rpm
+current = manual_current
+load = manual_load
+
+
+# =========================================================
+# TOP INFORMATION
+# =========================================================
+
+st.info(
+    f"**Live Sensor Inputs:**  "
+    f"Vibration: {vibration:.1f} mm/s  |  "
+    f"RPM: {rpm:.0f}  |  "
+    f"Current: {current:.1f} A  |  "
+    f"Load: {load:.0f} kg"
+)
+
+
+# =========================================================
+# 1. LIVE MOVING CONVEYOR
+# =========================================================
+
+st.header("1️⃣ 🎥 LIVE MOVING CONVEYOR")
 
 st.write(
-    "Simulation-based monitoring of conveyor operating parameters "
-    "using multi-sensor analysis, vibration signal processing, "
-    "rule-based sensor fusion and failure-risk estimation."
+    "The conveyor movement, belt tracking and material flow are "
+    "simulated for prototype demonstration."
 )
 
 
 # =========================================================
-# REFERENCE VALUES
+# 2–6 CAMERA MODULE
 # =========================================================
 
-NORMAL_VIBRATION = 3.0
-WARNING_VIBRATION = 6.0
-
-NORMAL_RPM = 1000.0
-NORMAL_CURRENT = 10.0
-
-MAX_LOAD = 100.0
+st.header("2️⃣ 📷 CAMERA-BASED VISUAL DETECTION")
 
 
-# =========================================================
-# SCENARIO SELECTION
-# =========================================================
+@st.fragment(run_every=CAMERA_INTERVAL)
+def live_camera_module():
 
-st.header("🎯 Conveyor Operating Scenario")
+    # Capture counter
+    st.session_state.camera_count += 1
 
-scenario = st.selectbox(
-    "Select a simulated operating condition",
-    [
-        "Normal Operation",
-        "Belt Joint Deterioration",
-        "Belt Damage",
-        "Belt Slip",
-        "Overload",
-        "Misalignment"
-    ]
-)
+    capture_number = st.session_state.camera_count
 
+    # Motion update
+    st.session_state.motion_offset += 55
 
-# =========================================================
-# BASE SENSOR VALUES
-# =========================================================
+    # Get simulated camera deviation
+    deviation = get_camera_deviation()
 
-scenario_values = {
+    classification, direction, visual_health = camera_classification(
+        deviation
+    )
 
-    "Normal Operation": {
-        "vibration": 2.0,
-        "rpm": 1000.0,
-        "current": 8.0,
-        "load": 50.0
-    },
+    # Timestamp
+    timestamp = datetime.now().strftime("%H:%M:%S")
 
-    "Belt Joint Deterioration": {
-        "vibration": 5.0,
-        "rpm": 990.0,
-        "current": 9.5,
-        "load": 60.0
-    },
+    # Create frame
+    fig = create_moving_conveyor_frame(
+        deviation,
+        capture_number
+    )
 
-    "Belt Damage": {
-        "vibration": 7.5,
-        "rpm": 980.0,
-        "current": 11.0,
-        "load": 65.0
-    },
-
-    "Belt Slip": {
-        "vibration": 4.0,
-        "rpm": 850.0,
-        "current": 12.0,
-        "load": 60.0
-    },
-
-    "Overload": {
-        "vibration": 5.0,
-        "rpm": 950.0,
-        "current": 17.0,
-        "load": 95.0
-    },
-
-    "Misalignment": {
-        "vibration": 6.5,
-        "rpm": 970.0,
-        "current": 13.0,
-        "load": 70.0
+    # Store history
+    history_entry = {
+        "Capture": capture_number,
+        "Time": timestamp,
+        "Deviation (%)": round(abs(deviation), 1),
+        "Direction": direction,
+        "Visual Health (%)": round(visual_health, 1),
+        "Result": classification
     }
-}
 
-
-selected = scenario_values[scenario]
-
-
-# =========================================================
-# INPUT PARAMETERS
-# =========================================================
-
-st.header("🔧 Conveyor Sensor Inputs")
-
-col1, col2 = st.columns(2)
-
-
-with col1:
-
-    vibration = st.number_input(
-        "Vibration (m/s²)",
-        min_value=0.0,
-        max_value=20.0,
-        value=float(selected["vibration"]),
-        step=0.1
+    st.session_state.camera_history.append(
+        history_entry
     )
 
-    rpm = st.number_input(
-        "Motor / Belt RPM",
-        min_value=0.0,
-        max_value=2000.0,
-        value=float(selected["rpm"]),
-        step=10.0
+    # Keep last 20 captures
+    st.session_state.camera_history = (
+        st.session_state.camera_history[-20:]
     )
 
+    # -----------------------------------------------------
+    # CAMERA IMAGE
+    # -----------------------------------------------------
 
-with col2:
-
-    current = st.number_input(
-        "Motor Current (A)",
-        min_value=0.0,
-        max_value=50.0,
-        value=float(selected["current"]),
-        step=0.1
+    st.pyplot(
+        fig,
+        use_container_width=True
     )
 
-    load = st.number_input(
-        "Load Cell (kg)",
-        min_value=0.0,
-        max_value=100.0,
-        value=float(selected["load"]),
-        step=0.5
+    plt.close(fig)
+
+    st.caption(
+        "Simulated overhead camera inspection — belt motion and "
+        "visual detection are simulated. Automatic frame capture "
+        "occurs every 3 seconds."
     )
 
+    # -----------------------------------------------------
+    # CAMERA METRICS
+    # -----------------------------------------------------
 
-# =========================================================
-# RUN BUTTON
-# =========================================================
+    st.subheader("3️⃣ 📐 BELT MISALIGNMENT / CENTERLINE TRACING")
 
-run_simulation = st.button(
-    "▶ RUN MONITORING & PREDICTION",
-    type="primary",
-    use_container_width=True
-)
+    c1, c2, c3, c4 = st.columns(4)
 
-
-if run_simulation:
-
-    # =====================================================
-    # TIME / SIGNAL SETTINGS
-    # =====================================================
-
-    duration = 10
-    sample_rate = 100
-
-    t = np.linspace(
-        0,
-        duration,
-        duration * sample_rate,
-        endpoint=False
+    c1.metric(
+        "Detected Deviation",
+        f"{abs(deviation):.1f}%"
     )
 
-    np.random.seed(42)
-
-
-    # =====================================================
-    # FAULT-SPECIFIC VIBRATION FREQUENCY
-    # =====================================================
-
-    if scenario == "Normal Operation":
-
-        vibration_frequency = 5
-
-    elif scenario == "Belt Joint Deterioration":
-
-        vibration_frequency = 8
-
-    elif scenario == "Belt Damage":
-
-        vibration_frequency = 12
-
-    elif scenario == "Belt Slip":
-
-        vibration_frequency = 4
-
-    elif scenario == "Overload":
-
-        vibration_frequency = 6
-
-    elif scenario == "Misalignment":
-
-        vibration_frequency = 10
-
-    else:
-
-        vibration_frequency = 5
-
-
-    # =====================================================
-    # 1. SIMULATED VIBRATION SIGNAL
-    # =====================================================
-
-    vibration_signal = (
-
-        vibration
-
-        + vibration * 0.10
-        * np.sin(
-            2 * np.pi * vibration_frequency * t
-        )
-
-        + np.random.normal(
-            0,
-            max(vibration * 0.02, 0.01),
-            len(t)
-        )
+    c2.metric(
+        "Direction",
+        direction
     )
 
-
-    # Add additional vibration components for damage
-    if scenario == "Belt Joint Deterioration":
-
-        vibration_signal += (
-            vibration * 0.15
-            * np.sin(2 * np.pi * 16 * t)
-        )
-
-
-    elif scenario == "Belt Damage":
-
-        vibration_signal += (
-            vibration * 0.20
-            * np.sin(2 * np.pi * 20 * t)
-        )
-
-
-    elif scenario == "Misalignment":
-
-        vibration_signal += (
-            vibration * 0.18
-            * np.sin(2 * np.pi * 15 * t)
-        )
-
-
-    # =====================================================
-    # 2. RPM SIGNAL
-    # =====================================================
-
-    rpm_signal = (
-
-        rpm
-
-        + 5
-        * np.sin(
-            2 * np.pi * 0.5 * t
-        )
-
-        + np.random.normal(
-            0,
-            1,
-            len(t)
-        )
+    c3.metric(
+        "Visual Health",
+        f"{visual_health:.1f}%"
     )
 
-
-    # =====================================================
-    # 3. MOTOR CURRENT SIGNAL
-    # =====================================================
-
-    current_signal = (
-
-        current
-
-        + current * 0.05
-        * np.sin(
-            2 * np.pi * 1 * t
-        )
-
-        + np.random.normal(
-            0,
-            max(current * 0.01, 0.01),
-            len(t)
-        )
+    c4.metric(
+        "Capture Number",
+        f"#{capture_number}"
     )
 
+    # -----------------------------------------------------
+    # CAMERA RESULT
+    # -----------------------------------------------------
 
-    # =====================================================
-    # 4. LOAD SIGNAL
-    # =====================================================
+    st.subheader("6️⃣ 🔍 CAMERA DETECTION RESULT")
 
-    load_signal = (
-
-        load
-
-        + load * 0.03
-        * np.sin(
-            2 * np.pi * 0.2 * t
-        )
-
-        + np.random.normal(
-            0,
-            max(load * 0.005, 0.01),
-            len(t)
-        )
-    )
-
-
-    # =====================================================
-    # RMS VIBRATION ANALYSIS
-    # =====================================================
-
-    vibration_rms = np.sqrt(
-        np.mean(
-            vibration_signal ** 2
-        )
-    )
-
-    vibration_rms = round(
-        vibration_rms,
-        2
-    )
-
-
-    # =====================================================
-    # FFT ANALYSIS
-    # =====================================================
-
-    n = len(vibration_signal)
-
-    fft_values = np.fft.fft(
-        vibration_signal
-    )
-
-    fft_frequencies = np.fft.fftfreq(
-        n,
-        1 / sample_rate
-    )
-
-    positive_mask = (
-        fft_frequencies >= 0
-    )
-
-    positive_frequencies = (
-        fft_frequencies[
-            positive_mask
-        ]
-    )
-
-    positive_fft = np.abs(
-        fft_values[
-            positive_mask
-        ]
-    ) / n
-
-
-    # Remove DC component
-    positive_frequencies = positive_frequencies[1:]
-    positive_fft = positive_fft[1:]
-
-
-    # Dominant frequency
-    if len(positive_fft) > 0:
-
-        dominant_index = np.argmax(
-            positive_fft
-        )
-
-        dominant_frequency = round(
-            positive_frequencies[
-                dominant_index
-            ],
-            2
-        )
-
-    else:
-
-        dominant_frequency = 0
-
-
-    # =====================================================
-    # 5. VIBRATION CONDITION
-    # =====================================================
-
-    if vibration <= NORMAL_VIBRATION:
-
-        vibration_condition = "NORMAL"
-        vibration_risk = 0
-
-    elif vibration <= WARNING_VIBRATION:
-
-        vibration_condition = "WARNING"
-        vibration_risk = 20
-
-    else:
-
-        vibration_condition = "CRITICAL"
-        vibration_risk = 40
-
-
-    # =====================================================
-    # 6. RPM ANALYSIS
-    # =====================================================
-
-    rpm_deviation = (
-        abs(rpm - NORMAL_RPM)
-        / NORMAL_RPM
-    ) * 100
-
-
-    if rpm_deviation <= 5:
-
-        rpm_condition = "NORMAL"
-        rpm_risk = 0
-
-    elif rpm_deviation <= 10:
-
-        rpm_condition = "WARNING"
-        rpm_risk = 15
-
-    else:
-
-        rpm_condition = "CRITICAL"
-        rpm_risk = 25
-
-
-    # =====================================================
-    # 7. MOTOR CURRENT ANALYSIS
-    # =====================================================
-
-    if current <= NORMAL_CURRENT:
-
-        current_condition = "NORMAL"
-        current_risk = 0
-
-    elif current <= 15:
-
-        current_condition = "WARNING"
-        current_risk = 15
-
-    else:
-
-        current_condition = "CRITICAL"
-        current_risk = 25
-
-
-    # =====================================================
-    # 8. LOAD ANALYSIS
-    # =====================================================
-
-    load_percentage = (
-        load / MAX_LOAD
-    ) * 100
-
-
-    if load_percentage <= 70:
-
-        load_condition = "NORMAL"
-        load_risk = 0
-
-    elif load_percentage <= 90:
-
-        load_condition = "WARNING"
-        load_risk = 10
-
-    else:
-
-        load_condition = "CRITICAL"
-        load_risk = 20
-
-
-    # =====================================================
-    # 9. RULE-BASED SENSOR FUSION
-    # =====================================================
-
-    risk_score = (
-
-        vibration_risk
-        + rpm_risk
-        + current_risk
-        + load_risk
-
-    )
-
-    risk_score = min(
-        risk_score,
-        100
-    )
-
-
-    # =====================================================
-    # 10. HEALTH SCORE
-    # =====================================================
-
-    health_score = (
-        100 - risk_score
-    )
-
-
-    # =====================================================
-    # 11. SENSOR SEVERITY
-    # =====================================================
-
-    # Vibration severity
-
-    vibration_severity = min(
-        (vibration / WARNING_VIBRATION)
-        * 100,
-        100
-    )
-
-
-    # RPM severity
-
-    rpm_severity = min(
-        (rpm_deviation / 10)
-        * 100,
-        100
-    )
-
-
-    # Current severity
-
-    if current <= NORMAL_CURRENT:
-
-        current_severity = 0
-
-    else:
-
-        current_severity = min(
-            (
-                (current - NORMAL_CURRENT)
-                / 5
-            ) * 100,
-            100
-        )
-
-
-    # Load severity
-
-    if load_percentage <= 70:
-
-        load_severity = 0
-
-    else:
-
-        load_severity = min(
-            (
-                (load_percentage - 70)
-                / 30
-            ) * 100,
-            100
-        )
-
-
-    # =====================================================
-    # 12. FAILURE-RISK ESTIMATION
-    # =====================================================
-
-    prediction_risk = (
-
-        0.40 * vibration_severity
-
-        + 0.25 * rpm_severity
-
-        + 0.20 * current_severity
-
-        + 0.15 * load_severity
-
-    )
-
-
-    prediction_risk = min(
-        round(prediction_risk),
-        100
-    )
-
-
-    # =====================================================
-    # 13. FAILURE-RISK LEVEL
-    # =====================================================
-
-    if prediction_risk < 25:
-
-        prediction_level = "LOW"
-
-        prediction_message = (
-            "Conveyor is operating normally. "
-            "Continue routine monitoring."
-        )
-
-        prediction_horizon = (
-            "No immediate failure indication"
-        )
-
-
-    elif prediction_risk < 50:
-
-        prediction_level = "MODERATE"
-
-        prediction_message = (
-            "Early abnormal behavior detected. "
-            "Increase monitoring frequency."
-        )
-
-        prediction_horizon = (
-            "Monitor over upcoming operating cycles"
-        )
-
-
-    elif prediction_risk < 75:
-
-        prediction_level = "HIGH"
-
-        prediction_message = (
-            "Elevated failure risk detected. "
-            "Preventive inspection should be scheduled."
-        )
-
-        prediction_horizon = (
-            "Possible degradation developing"
-        )
-
-
-    else:
-
-        prediction_level = "CRITICAL"
-
-        prediction_message = (
-            "Very high failure risk detected. "
-            "Immediate conveyor inspection is recommended."
-        )
-
-        prediction_horizon = (
-            "Possible near-term failure"
-        )
-
-
-    # =====================================================
-    # 14. CURRENT CONVEYOR CONDITION
-    # =====================================================
-
-    if health_score >= 80:
-
-        condition = "NORMAL"
-        status = "🟢"
-
-    elif health_score >= 60:
-
-        condition = "WARNING"
-        status = "🟡"
-
-    else:
-
-        condition = "CRITICAL"
-        status = "🔴"
-
-
-    # =====================================================
-    # OUTPUT
-    # =====================================================
-
-    st.divider()
-
-    st.header("📊 Monitoring Results")
-
-
-    # =====================================================
-    # TOP METRICS
-    # =====================================================
-
-    col1, col2, col3, col4 = st.columns(4)
-
-
-    with col1:
-
-        st.metric(
-            "Health Score",
-            f"{health_score}/100"
-        )
-
-
-    with col2:
-
-        st.metric(
-            "Current Condition",
-            f"{status} {condition}"
-        )
-
-
-    with col3:
-
-        st.metric(
-            "Failure Risk",
-            f"{prediction_risk}%"
-        )
-
-
-    with col4:
-
-        st.metric(
-            "Load Utilization",
-            f"{load_percentage:.1f}%"
-        )
-
-
-    # =====================================================
-    # SCENARIO
-    # =====================================================
-
-    st.subheader("🎯 Simulated Fault Scenario")
-
-    st.info(
-        f"Current simulation: **{scenario}**"
-    )
-
-
-    # =====================================================
-    # FAILURE-RISK ASSESSMENT
-    # =====================================================
-
-    st.subheader("🔮 Failure-Risk Assessment")
-
-
-    col1, col2, col3 = st.columns(3)
-
-
-    with col1:
-
-        st.metric(
-            "Risk",
-            f"{prediction_risk}%"
-        )
-
-
-    with col2:
-
-        st.metric(
-            "Risk Level",
-            prediction_level
-        )
-
-
-    with col3:
-
-        st.metric(
-            "Assessment",
-            prediction_horizon
-        )
-
-
-    if prediction_level == "LOW":
+    if classification == "NORMAL":
 
         st.success(
-            "🟢 " + prediction_message
+            f"🟢 NORMAL — Belt tracking within acceptable range. "
+            f"Deviation = {abs(deviation):.1f}%"
         )
 
-
-    elif prediction_level == "MODERATE":
-
-        st.info(
-            "🔵 " + prediction_message
-        )
-
-
-    elif prediction_level == "HIGH":
+    elif classification == "WARNING":
 
         st.warning(
-            "🟡 " + prediction_message
+            f"🟠 WARNING — Belt tracking deviation detected. "
+            f"Direction = {direction}, "
+            f"Deviation = {abs(deviation):.1f}%"
         )
-
 
     else:
 
         st.error(
-            "🔴 " + prediction_message
+            f"🔴 CRITICAL — Severe belt misalignment detected. "
+            f"Direction = {direction}, "
+            f"Deviation = {abs(deviation):.1f}%"
+        )
+
+    # -----------------------------------------------------
+    # CAPTURE HISTORY
+    # -----------------------------------------------------
+
+    st.subheader("5️⃣ 📸 CAMERA CAPTURE HISTORY")
+
+    history_df = pd.DataFrame(
+        st.session_state.camera_history
+    )
+
+    if not history_df.empty:
+
+        st.dataframe(
+            history_df,
+            use_container_width=True,
+            hide_index=True
         )
 
 
-    # =====================================================
-    # VIBRATION SIGNAL ANALYSIS
-    # =====================================================
-
-    st.divider()
-
-    st.header("📈 Vibration Signal Analysis")
+live_camera_module()
 
 
-    col1, col2 = st.columns(2)
+# =========================================================
+# CURRENT CAMERA STATE FOR OTHER MODULES
+# =========================================================
+
+if st.session_state.camera_history:
+
+    latest_camera = (
+        st.session_state.camera_history[-1]
+    )
+
+    camera_health = latest_camera[
+        "Visual Health (%)"
+    ]
+
+    camera_result = latest_camera[
+        "Result"
+    ]
+
+    camera_direction = latest_camera[
+        "Direction"
+    ]
+
+    camera_deviation = latest_camera[
+        "Deviation (%)"
+    ]
+
+else:
+
+    camera_health = 100
+    camera_result = "NORMAL"
+    camera_direction = "CENTERED"
+    camera_deviation = 0
 
 
-    with col1:
+# =========================================================
+# 7. MONITORING RESULTS
+# =========================================================
 
-        st.metric(
-            "Vibration Input",
-            f"{vibration:.2f} m/s²"
-        )
+st.header("7️⃣ 📊 MONITORING RESULTS")
+
+st.caption("Every metric below is recalculated directly from the current live sensor inputs.")
+
+load_utilization = (
+    load / NORMAL_LOAD
+) * 100
+
+v_health = vibration_health(vibration)
+r_health = rpm_health(rpm)
+c_health = current_health(current)
+l_health = load_health(load)
+
+sensor_health = (
+    W_VIBRATION * v_health +
+    W_RPM * r_health +
+    W_CURRENT * c_health +
+    W_LOAD * l_health
+)
+
+overall_health = (
+    SENSOR_FUSION_WEIGHT * sensor_health +
+    CAMERA_FUSION_WEIGHT * camera_health
+)
+
+failure_risk = clamp(
+    100 - overall_health
+)
+
+# Save sensor history
+st.session_state.sensor_history.append(
+    {
+        "Time": datetime.now().strftime("%H:%M:%S"),
+        "Vibration": vibration,
+        "RPM": rpm,
+        "Current": current,
+        "Load": load,
+        "Health": overall_health
+    }
+)
+
+st.session_state.sensor_history = (
+    st.session_state.sensor_history[-50:]
+)
 
 
-    with col2:
+# =========================================================
+# MONITORING METRICS
+# =========================================================
 
-        st.metric(
-            "Vibration RMS",
-            f"{vibration_rms:.2f} m/s²"
-        )
+m1, m2, m3, m4 = st.columns(4)
+
+m1.metric(
+    "Vibration",
+    f"{vibration:.1f} mm/s"
+)
+
+m2.metric(
+    "RPM",
+    f"{rpm:.0f}"
+)
+
+m3.metric(
+    "Motor Current",
+    f"{current:.1f} A"
+)
+
+m4.metric(
+    "Load",
+    f"{load:.0f} kg"
+)
+
+st.info(
+    f"**Load Utilization = {load:.1f} / {NORMAL_LOAD:.0f} × 100 = "
+    f"{load_utilization:.1f}%**"
+)
 
 
-    st.write(
-        f"**Dominant vibration frequency:** "
-        f"{dominant_frequency:.2f} Hz"
+# =========================================================
+# 8. LIVE CONDITION INTERPRETATION
+# =========================================================
+
+st.header("8️⃣ 🧭 LIVE CONDITION INTERPRETATION")
+
+live_flags = []
+
+if vibration > VIBRATION_WARNING:
+    live_flags.append("Elevated vibration")
+if abs(rpm - NORMAL_RPM) > 100:
+    live_flags.append("Significant RPM deviation")
+if current > CURRENT_WARNING:
+    live_flags.append("High motor current")
+if load > LOAD_WARNING:
+    live_flags.append("High conveyor load")
+if camera_result in ["WARNING", "CRITICAL"]:
+    live_flags.append("Visual belt tracking deviation")
+
+if not live_flags:
+    st.success(
+        "🟢 LIVE CONDITION: NORMAL — Current sensor values and camera tracking "
+        "are within the simulated acceptable range."
+    )
+else:
+    st.warning(
+        "⚠️ LIVE CONDITION: ABNORMAL — " + ", ".join(live_flags) +
+        ". The downstream health, risk, fault and maintenance results "
+        "have been recalculated from the current inputs."
     )
 
 
-    # =====================================================
-    # VIBRATION TIME-DOMAIN GRAPH
-    # =====================================================
+# =========================================================
+# 9. VIBRATION SIGNAL ANALYSIS
+# =========================================================
 
+st.header("9️⃣ 📈 VIBRATION SIGNAL ANALYSIS")
+
+Fs = 1000
+duration = 2
+
+t = np.arange(
+    0,
+    duration,
+    1 / Fs
+)
+
+rng = np.random.default_rng(
+    42 + st.session_state.camera_count
+)
+
+noise = rng.normal(
+    0,
+    0.25,
+    len(t)
+)
+
+
+# The waveform changes with the entered vibration value.
+# Higher vibration produces a larger signal amplitude; a small RPM-linked
+# component keeps the simulated signal responsive to another live input.
+rpm_frequency = max(5.0, rpm / 60.0)
+signal = (
+    vibration
+    + (0.18 * vibration) * np.sin(2 * np.pi * rpm_frequency * t)
+    + (0.08 * vibration) * np.sin(2 * np.pi * 2 * rpm_frequency * t)
+    + noise
+)
+
+
+# RMS
+vibration_rms = np.sqrt(
+    np.mean(signal ** 2)
+)
+
+st.metric(
+    "Calculated Vibration RMS",
+    f"{vibration_rms:.2f} mm/s"
+)
+
+fig_vib, ax_vib = plt.subplots(
+    figsize=(12, 4)
+)
+
+ax_vib.plot(
+    t[:3000],
+    signal[:3000]
+)
+
+ax_vib.set_title(
+    "Simulated Vibration Time-Domain Signal"
+)
+
+ax_vib.set_xlabel(
+    "Time (s)"
+)
+
+ax_vib.set_ylabel(
+    "Vibration (mm/s)"
+)
+
+ax_vib.grid(True)
+
+st.pyplot(
+    fig_vib,
+    use_container_width=True
+)
+
+plt.close(fig_vib)
+
+
+# =========================================================
+# 10. FFT FREQUENCY ANALYSIS
+# =========================================================
+
+st.header("🔬 10️⃣ FFT FREQUENCY ANALYSIS")
+
+N = len(signal)
+
+fft_values = np.fft.rfft(
+    signal - np.mean(signal)
+)
+
+frequencies = np.fft.rfftfreq(
+    N,
+    1 / Fs
+)
+
+magnitude = (
+    2 / N
+) * np.abs(fft_values)
+
+dominant_index = np.argmax(
+    magnitude[1:]
+) + 1
+
+dominant_frequency = frequencies[
+    dominant_index
+]
+
+dominant_amplitude = magnitude[
+    dominant_index
+]
+
+f1, f2 = st.columns(2)
+
+f1.metric(
+    "Dominant Frequency",
+    f"{dominant_frequency:.2f} Hz"
+)
+
+f2.metric(
+    "Dominant Amplitude",
+    f"{dominant_amplitude:.3f}"
+)
+
+fig_fft, ax_fft = plt.subplots(
+    figsize=(12, 4)
+)
+
+ax_fft.plot(
+    frequencies,
+    magnitude
+)
+
+ax_fft.set_xlim(
+    0,
+    300
+)
+
+ax_fft.set_title(
+    "FFT Frequency Spectrum"
+)
+
+ax_fft.set_xlabel(
+    "Frequency (Hz)"
+)
+
+ax_fft.set_ylabel(
+    "Magnitude"
+)
+
+ax_fft.grid(True)
+
+st.pyplot(
+    fig_fft,
+    use_container_width=True
+)
+
+plt.close(fig_fft)
+
+st.caption(
+    "FFT converts the vibration signal from the time domain into "
+    "the frequency domain to identify dominant periodic components."
+)
+
+
+# =========================================================
+# 11. MULTI-SENSOR ANALYSIS
+# =========================================================
+
+st.header("1️⃣1️⃣ 🔍 MULTI-SENSOR ANALYSIS")
+
+sensor_df = pd.DataFrame(
+    {
+        "Parameter": [
+            "Vibration",
+            "RPM",
+            "Motor Current",
+            "Load"
+        ],
+
+        "Measured Value": [
+            vibration,
+            rpm,
+            current,
+            load
+        ],
+
+        "Normal Reference": [
+            NORMAL_VIBRATION,
+            NORMAL_RPM,
+            NORMAL_CURRENT,
+            NORMAL_LOAD
+        ],
+
+        "Health (%)": [
+            v_health,
+            r_health,
+            c_health,
+            l_health
+        ]
+    }
+)
+
+st.dataframe(
+    sensor_df.style.format(
+        {
+            "Measured Value": "{:.2f}",
+            "Normal Reference": "{:.2f}",
+            "Health (%)": "{:.1f}"
+        }
+    ),
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# =========================================================
+# 12. SENSOR TRENDS
+# =========================================================
+
+st.header("1️⃣2️⃣ 📊 SENSOR TRENDS")
+
+trend_df = pd.DataFrame(
+    st.session_state.sensor_history
+)
+
+if not trend_df.empty:
+
+    # Vibration
     fig1, ax1 = plt.subplots(
-        figsize=(10, 4)
+        figsize=(12, 3)
     )
-
 
     ax1.plot(
-        t,
-        vibration_signal,
-        label="Simulated Vibration"
+        trend_df.index,
+        trend_df["Vibration"],
+        marker="o"
     )
-
 
     ax1.axhline(
-        NORMAL_VIBRATION,
+        VIBRATION_WARNING,
         linestyle="--",
-        label="Normal Limit"
+        label="Warning Threshold"
     )
-
-
-    ax1.axhline(
-        WARNING_VIBRATION,
-        linestyle="--",
-        label="Warning Limit"
-    )
-
 
     ax1.set_title(
-        "Vibration Signal — Accelerometer"
+        "Vibration Trend"
     )
-
-
-    ax1.set_xlabel(
-        "Time (s)"
-    )
-
 
     ax1.set_ylabel(
-        "Acceleration (m/s²)"
+        "mm/s"
     )
-
 
     ax1.legend()
 
     ax1.grid(True)
 
-    st.pyplot(fig1)
-
-
-    # =====================================================
-    # FFT GRAPH
-    # =====================================================
-
-    st.subheader("🔬 FFT Frequency Analysis")
-
-
-    fig_fft, ax_fft = plt.subplots(
-        figsize=(10, 4)
+    st.pyplot(
+        fig1,
+        use_container_width=True
     )
 
+    plt.close(fig1)
 
-    ax_fft.plot(
-        positive_frequencies,
-        positive_fft
-    )
-
-
-    ax_fft.set_xlim(
-        0,
-        50
-    )
-
-
-    ax_fft.set_title(
-        "Vibration Frequency Spectrum — FFT"
-    )
-
-
-    ax_fft.set_xlabel(
-        "Frequency (Hz)"
-    )
-
-
-    ax_fft.set_ylabel(
-        "Amplitude"
-    )
-
-
-    ax_fft.grid(True)
-
-    st.pyplot(fig_fft)
-
-
-    st.caption(
-        "FFT is used in the simulation to identify dominant "
-        "frequency components in the vibration signal."
-    )
-
-
-    # =====================================================
-    # SENSOR ANALYSIS TABLE
-    # =====================================================
-
-    st.divider()
-
-    st.header("🔍 Multi-Sensor Analysis")
-
-
-    data = {
-
-        "Parameter": [
-
-            "Vibration",
-            "Vibration RMS",
-            "Dominant Frequency",
-            "RPM",
-            "Motor Current",
-            "Load"
-
-        ],
-
-        "Input": [
-
-            f"{vibration:.2f} m/s²",
-            f"{vibration_rms:.2f} m/s²",
-            f"{dominant_frequency:.2f} Hz",
-            f"{rpm:.0f} RPM",
-            f"{current:.2f} A",
-            f"{load:.2f} kg"
-
-        ],
-
-        "Condition": [
-
-            vibration_condition,
-            vibration_condition,
-            "Signal Analysis",
-            rpm_condition,
-            current_condition,
-            load_condition
-
-        ],
-
-        "Risk Contribution": [
-
-            vibration_risk,
-            "-",
-            "-",
-            rpm_risk,
-            current_risk,
-            load_risk
-
-        ]
-
-    }
-
-
-    df = pd.DataFrame(
-        data
-    )
-
-
-    st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-    # =====================================================
-    # FAULT DETECTION
-    # =====================================================
-
-    st.header("🚨 Fault Detection")
-
-
-    faults = []
-
-
-    # High vibration
-
-    if vibration > WARNING_VIBRATION:
-
-        faults.append(
-            "High vibration — possible belt joint "
-            "deterioration, belt damage or mechanical abnormality."
-        )
-
-
-    # RPM deviation
-
-    if rpm_deviation > 10:
-
-        faults.append(
-            "Abnormal RPM — possible belt slip "
-            "or drive problem."
-        )
-
-
-    # High current
-
-    if current > 15:
-
-        faults.append(
-            "High motor current — possible overload "
-            "or mechanical resistance."
-        )
-
-
-    # Excessive load
-
-    if load_percentage > 90:
-
-        faults.append(
-            "Excessive conveyor load detected."
-        )
-
-
-    # Scenario-specific diagnosis
-
-    if scenario == "Belt Joint Deterioration":
-
-        faults.append(
-            "Belt joint deterioration scenario — "
-            "increased vibration indicates possible splice degradation."
-        )
-
-
-    elif scenario == "Belt Damage":
-
-        faults.append(
-            "Belt damage scenario — elevated vibration "
-            "indicates possible belt structural damage."
-        )
-
-
-    elif scenario == "Belt Slip":
-
-        faults.append(
-            "Belt slip scenario — significant RPM deviation detected."
-        )
-
-
-    elif scenario == "Overload":
-
-        faults.append(
-            "Overload scenario — high load/current combination detected."
-        )
-
-
-    elif scenario == "Misalignment":
-
-        faults.append(
-            "Misalignment scenario — elevated vibration and "
-            "RPM deviation indicate abnormal belt tracking."
-        )
-
-
-    # =====================================================
-    # DISPLAY FAULTS
-    # =====================================================
-
-    if len(faults) == 0:
-
-        st.success(
-            "✅ No significant abnormality detected."
-        )
-
-    else:
-
-        # Remove duplicate messages
-        faults = list(
-            dict.fromkeys(faults)
-        )
-
-        for fault in faults:
-
-            st.warning(
-                "⚠️ " + fault
-            )
-
-
-    # =====================================================
-    # SENSOR TREND GRAPHS
-    # =====================================================
-
-    st.divider()
-
-    st.header("📊 Sensor Trends")
-
-
-    # =====================================================
-    # RPM GRAPH
-    # =====================================================
-
+    # RPM
     fig2, ax2 = plt.subplots(
-        figsize=(10, 3)
+        figsize=(12, 3)
     )
-
 
     ax2.plot(
-        t,
-        rpm_signal
+        trend_df.index,
+        trend_df["RPM"],
+        marker="o"
     )
-
 
     ax2.axhline(
         NORMAL_RPM,
         linestyle="--",
-        label="Reference RPM"
+        label="Normal RPM"
     )
-
 
     ax2.set_title(
-        "RPM Signal"
+        "RPM Trend"
     )
-
-
-    ax2.set_xlabel(
-        "Time (s)"
-    )
-
 
     ax2.set_ylabel(
         "RPM"
     )
 
-
     ax2.legend()
 
     ax2.grid(True)
 
-    st.pyplot(fig2)
-
-
-    # =====================================================
-    # CURRENT GRAPH
-    # =====================================================
-
-    fig3, ax3 = plt.subplots(
-        figsize=(10, 3)
+    st.pyplot(
+        fig2,
+        use_container_width=True
     )
 
+    plt.close(fig2)
+
+    # Current
+    fig3, ax3 = plt.subplots(
+        figsize=(12, 3)
+    )
 
     ax3.plot(
-        t,
-        current_signal
+        trend_df.index,
+        trend_df["Current"],
+        marker="o"
     )
-
 
     ax3.axhline(
-        NORMAL_CURRENT,
+        CURRENT_WARNING,
         linestyle="--",
-        label="Normal Current Limit"
+        label="Warning Threshold"
     )
-
 
     ax3.set_title(
-        "Motor Current Signal"
+        "Motor Current Trend"
     )
-
-
-    ax3.set_xlabel(
-        "Time (s)"
-    )
-
 
     ax3.set_ylabel(
-        "Current (A)"
+        "A"
     )
-
 
     ax3.legend()
 
     ax3.grid(True)
 
-    st.pyplot(fig3)
-
-
-    # =====================================================
-    # LOAD GRAPH
-    # =====================================================
-
-    fig4, ax4 = plt.subplots(
-        figsize=(10, 3)
+    st.pyplot(
+        fig3,
+        use_container_width=True
     )
 
+    plt.close(fig3)
+
+    # Load
+    fig4, ax4 = plt.subplots(
+        figsize=(12, 3)
+    )
 
     ax4.plot(
-        t,
-        load_signal
+        trend_df.index,
+        trend_df["Load"],
+        marker="o"
     )
-
 
     ax4.axhline(
-        MAX_LOAD,
+        LOAD_WARNING,
         linestyle="--",
-        label="Maximum Load"
+        label="Warning Threshold"
     )
-
 
     ax4.set_title(
-        "Load Cell Signal"
+        "Load Trend"
     )
-
-
-    ax4.set_xlabel(
-        "Time (s)"
-    )
-
 
     ax4.set_ylabel(
-        "Load (kg)"
+        "kg"
     )
-
 
     ax4.legend()
 
     ax4.grid(True)
 
-    st.pyplot(fig4)
+    st.pyplot(
+        fig4,
+        use_container_width=True
+    )
+
+    plt.close(fig4)
 
 
-    # =====================================================
-    # MAINTENANCE RECOMMENDATION
-    # =====================================================
+# =========================================================
+# 13. MULTI-MODAL HEALTH ASSESSMENT
+# =========================================================
 
-    st.divider()
+st.header("1️⃣3️⃣ 🧠 MULTI-MODAL HEALTH ASSESSMENT")
 
-    st.header("🛠️ Maintenance Recommendation")
+st.write(
+    "The final conveyor health score combines the four physical "
+    "sensor channels with the simulated camera inspection result."
+)
 
+h1, h2, h3 = st.columns(3)
 
-    if scenario == "Normal Operation":
+h1.metric(
+    "Camera Health",
+    f"{camera_health:.1f}%"
+)
 
-        recommendation = (
-            "Continue routine monitoring and scheduled maintenance."
-        )
+h2.metric(
+    "Sensor Health",
+    f"{sensor_health:.1f}%"
+)
 
+h3.metric(
+    "Overall Conveyor Health",
+    f"{overall_health:.1f}%"
+)
 
-    elif scenario == "Belt Joint Deterioration":
+st.progress(
+    int(overall_health)
+)
 
-        recommendation = (
-            "Inspect belt joint/splice condition. "
-            "Check for wear, cracks, loosening and progressive vibration."
-        )
+# Fusion contribution
 
+col1, col2 = st.columns(2)
 
-    elif scenario == "Belt Damage":
-
-        recommendation = (
-            "Inspect the belt for cracks, tears, edge damage and "
-            "rubber deterioration. Schedule preventive maintenance."
-        )
-
-
-    elif scenario == "Belt Slip":
-
-        recommendation = (
-            "Inspect belt tension, drive pulley condition and "
-            "belt-drive system for slip."
-        )
-
-
-    elif scenario == "Overload":
-
-        recommendation = (
-            "Reduce excessive loading and inspect motor, drive and "
-            "belt components for overload-related stress."
-        )
-
-
-    elif scenario == "Misalignment":
-
-        recommendation = (
-            "Inspect belt tracking, idlers, pulleys and conveyor "
-            "alignment for abnormal mechanical conditions."
-        )
-
-
-    else:
-
-        recommendation = (
-            "Perform preventive inspection."
-        )
-
+with col1:
 
     st.info(
-        "🔧 " + recommendation
+        f"""
+        **Sensor Contribution**
+
+        Sensor Health = **{sensor_health:.1f}%**
+
+        Weight = **80%**
+
+        Contribution =
+        {sensor_health:.1f} × 0.80 =
+        **{sensor_health * 0.80:.1f}**
+        """
+    )
+
+with col2:
+
+    st.info(
+        f"""
+        **Camera Contribution**
+
+        Camera Health = **{camera_health:.1f}%**
+
+        Weight = **20%**
+
+        Contribution =
+        {camera_health:.1f} × 0.20 =
+        **{camera_health * 0.20:.1f}**
+        """
+    )
+
+st.success(
+    f"🧠 **FUSED OVERALL CONVEYOR HEALTH = {overall_health:.1f}%**"
+)
+
+
+# =========================================================
+# 14. FAILURE RISK
+# =========================================================
+
+st.header("1️⃣4️⃣ 🚨 FAILURE-RISK ASSESSMENT")
+
+risk_index = failure_risk
+
+if risk_index <= 20:
+
+    risk_level = "LOW"
+
+elif risk_index <= 45:
+
+    risk_level = "MODERATE"
+
+elif risk_index <= 70:
+
+    risk_level = "HIGH"
+
+else:
+
+    risk_level = "CRITICAL"
+
+
+r1, r2, r3 = st.columns(3)
+
+r1.metric(
+    "Failure-Risk Index",
+    f"{risk_index:.1f}%"
+)
+
+r2.metric(
+    "Risk Level",
+    risk_level
+)
+
+r3.metric(
+    "Overall Health",
+    f"{overall_health:.1f}%"
+)
+
+st.progress(
+    int(risk_index)
+)
+
+
+if risk_level == "LOW":
+
+    st.success(
+        f"🟢 LOW RISK — Current operating condition is within the simulated healthy range. "
+        f"Failure-Risk Index = {risk_index:.1f}%."
+    )
+
+elif risk_level == "MODERATE":
+
+    st.warning(
+        f"🟠 MODERATE RISK — Abnormal indicators are emerging. "
+        f"Failure-Risk Index = {risk_index:.1f}%."
+    )
+
+elif risk_level == "HIGH":
+
+    st.warning(
+        f"🟠 HIGH RISK — Significant abnormality detected. "
+        f"Inspection and preventive maintenance are recommended. "
+        f"Failure-Risk Index = {risk_index:.1f}%."
+    )
+
+else:
+
+    st.error(
+        f"🔴 CRITICAL RISK — Multiple abnormal indicators require immediate inspection. "
+        f"Failure-Risk Index = {risk_index:.1f}%."
     )
 
 
-    # =====================================================
-    # FINAL DIAGNOSIS
-    # =====================================================
-
-    st.divider()
-
-    st.header("📝 Final Diagnosis")
-
-
-    if condition == "NORMAL":
-
-        st.success(
-            "🟢 NORMAL: Conveyor is operating within "
-            "the defined operating limits."
-        )
-
-
-    elif condition == "WARNING":
-
-        st.warning(
-            "🟡 WARNING: Abnormal operating behavior detected. "
-            "Preventive inspection is recommended."
-        )
-
-
-    else:
-
-        st.error(
-            "🔴 CRITICAL: Significant abnormality detected. "
-            "Immediate conveyor inspection is recommended."
-        )
-
-
-    # =====================================================
-    # METHODOLOGY
-    # =====================================================
-
-    st.divider()
-
-    st.header("⚙️ Simulation Methodology")
-
+with st.expander(
+    "🔬 How is the Failure-Risk Index calculated?"
+):
 
     st.write(
-        """
-        **Sensor Inputs**
-        
-        Vibration + RPM + Motor Current + Load
-        
-        ↓
-        
-        **Signal Simulation**
-        
-        Simulated operating/fault conditions
-        
-        ↓
-        
-        **Vibration Signal Processing**
-        
-        RMS + FFT
-        
-        ↓
-        
-        **Rule-Based Multi-Sensor Fusion**
-        
-        Predefined thresholds + weighted risk contribution
-        
-        ↓
-        
-        **Health & Failure-Risk Assessment**
-        
-        Health Score + Risk %
-        
-        ↓
-        
-        **Fault Detection**
-        
-        Belt joint deterioration / belt damage / belt slip /
-        overload / misalignment
-        
-        ↓
-        
-        **Maintenance Recommendation**
-        
-        Suggested inspection/action
+        f"""
+        The prototype defines a simulated Failure-Risk Index as the
+        complement of the fused conveyor health:
+
+        **Failure-Risk Index = 100 − Overall Conveyor Health**
+
+        Current values:
+
+        • Overall Conveyor Health = **{overall_health:.1f}%**
+
+        • Failure-Risk Index = **{risk_index:.1f}%**
+
+        This is a **simulation-based risk indicator**, not a statistically
+        calibrated probability of failure. A deployed system would require
+        historical conveyor failure data for probability calibration.
         """
     )
 
 
+# =========================================================
+# 15. BELT / JOINT DAMAGE SEVERITY INDEX
+# =========================================================
+
+st.header("1️⃣5️⃣ 🩺 BELT / JOINT DAMAGE SEVERITY INDEX")
+
+# Normalize sensor abnormality
+
+vibration_severity = clamp(
+    ((vibration - NORMAL_VIBRATION) /
+     (10 - NORMAL_VIBRATION)) * 100
+)
+
+rpm_severity = clamp(
+    abs(rpm - NORMAL_RPM) /
+    NORMAL_RPM * 100
+)
+
+current_severity = clamp(
+    ((current - NORMAL_CURRENT) /
+     (20 - NORMAL_CURRENT)) * 100
+)
+
+load_severity = clamp(
+    ((load - NORMAL_LOAD) /
+     NORMAL_LOAD) * 100
+)
+
+camera_severity = clamp(
+    camera_deviation / CAMERA_CRITICAL * 100
+)
+
+damage_severity = (
+    0.30 * vibration_severity +
+    0.15 * rpm_severity +
+    0.20 * current_severity +
+    0.15 * load_severity +
+    0.20 * camera_severity
+)
+
+damage_severity = clamp(
+    damage_severity
+)
+
+
+if damage_severity <= 20:
+
+    damage_level = "LOW"
+
+elif damage_severity <= 45:
+
+    damage_level = "MODERATE"
+
+elif damage_severity <= 70:
+
+    damage_level = "HIGH"
+
+else:
+
+    damage_level = "CRITICAL"
+
+
+d1, d2 = st.columns(2)
+
+d1.metric(
+    "Damage Severity Index",
+    f"{damage_severity:.1f}%"
+)
+
+d2.metric(
+    "Severity Level",
+    damage_level
+)
+
+st.progress(
+    int(damage_severity)
+)
+
+st.caption(
+    "The Damage Severity Index is a weighted simulation indicator "
+    "combining abnormal sensor conditions and camera deviation."
+)
+
+
+# =========================================================
+# 16. FAULT DETECTION
+# =========================================================
+
+st.header("1️⃣6️⃣ 🚨 FAULT DETECTION")
+
+faults = []
+
+if vibration > VIBRATION_WARNING:
+    faults.append(
+        "Elevated vibration — possible idler/bearing/mechanical abnormality"
+    )
+
+if abs(rpm - NORMAL_RPM) > 100:
+    faults.append(
+        "RPM deviation — possible belt slip, drive or speed abnormality"
+    )
+
+if current > CURRENT_WARNING:
+    faults.append(
+        "High motor current — possible overload or increased mechanical resistance"
+    )
+
+if load > LOAD_WARNING:
+    faults.append(
+        "High conveyor load — increased loading condition"
+    )
+
+if camera_result == "WARNING":
+    faults.append(
+        f"Visual belt misalignment warning — belt shifted {camera_direction}"
+    )
+
+if camera_result == "CRITICAL":
+    faults.append(
+        f"Critical visual belt misalignment — severe shift {camera_direction}"
+    )
+
+
+if not faults:
+
+    st.success(
+        "🟢 No significant abnormality detected by the current simulation."
+    )
+
+else:
+
+    for fault in faults:
+
+        st.warning(
+            f"⚠️ {fault}"
+        )
+
+
+# =========================================================
+# 17. MAINTENANCE RECOMMENDATION
+# =========================================================
+
+st.header("1️⃣7️⃣ 🛠️ MAINTENANCE RECOMMENDATION")
+
+recommendations = []
+
+
+if vibration > VIBRATION_WARNING:
+
+    recommendations.append(
+        "Inspect idler rollers, bearings, mounting points and mechanical looseness."
+    )
+
+
+if abs(rpm - NORMAL_RPM) > 100:
+
+    recommendations.append(
+        "Inspect belt traction, drive pulley, motor coupling and speed transmission."
+    )
+
+
+if current > CURRENT_WARNING:
+
+    recommendations.append(
+        "Check motor loading, drive system, material accumulation and mechanical resistance."
+    )
+
+
+if load > LOAD_WARNING:
+
+    recommendations.append(
+        "Check material loading and ensure conveyor operation remains within allowable load."
+    )
+
+
+if camera_result in ["WARNING", "CRITICAL"]:
+
+    recommendations.append(
+        "Inspect belt tracking, idler alignment, pulley alignment and belt edges."
+    )
+
+
+if not recommendations:
+
+    recommendations.append(
+        "Continue routine condition monitoring and preventive maintenance."
+    )
+
+
+for i, recommendation in enumerate(
+    recommendations,
+    start=1
+):
+
+    st.info(
+        f"**{i}.** {recommendation}"
+    )
+
+
+# =========================================================
+# FINAL DIAGNOSIS
+# =========================================================
+
+# =========================================================
+# FINAL DIAGNOSIS
+# =========================================================
+
+st.header("1️⃣8️⃣ 📝 FINAL DIAGNOSIS")
+
+
+# Determine final condition
+if overall_health >= 80:
+
+    diagnosis_status = "NORMAL"
+
+    diagnosis_message = (
+        "Conveyor operating condition is currently stable. "
+        "Continue condition monitoring."
+    )
+
+    box_bg = "#eaf7ea"
+    box_border = "#2e8b57"
+
+elif overall_health >= 60:
+
+    diagnosis_status = "WARNING"
+
+    diagnosis_message = (
+        "Abnormal indicators are present. Preventive inspection "
+        "is recommended before the condition escalates."
+    )
+
+    box_bg = "#fff8e1"
+    box_border = "#d99a00"
+
+else:
+
+    diagnosis_status = "CRITICAL"
+
+    diagnosis_message = (
+        "Multiple abnormal indicators suggest elevated conveyor risk. "
+        "Immediate inspection and maintenance action are recommended."
+    )
+
+    box_bg = "#fdecec"
+    box_border = "#d32f2f"
+
+
+# =========================================================
+# FINAL DIAGNOSIS DISPLAY
+# =========================================================
+
+if diagnosis_status == "NORMAL":
+
+    st.success(
+        f"🟢 FINAL DIAGNOSIS: {diagnosis_status}\n\n"
+        f"{diagnosis_message}"
+    )
+
+elif diagnosis_status == "WARNING":
+
+    st.warning(
+        f"🟠 FINAL DIAGNOSIS: {diagnosis_status}\n\n"
+        f"{diagnosis_message}"
+    )
+
+else:
+
+    st.error(
+        f"🔴 FINAL DIAGNOSIS: {diagnosis_status}\n\n"
+        f"{diagnosis_message}"
+    )
+
+
+# =========================================================
+# DIAGNOSIS SUMMARY
+# =========================================================
+
+d1, d2, d3, d4 = st.columns(4)
+
+d1.metric(
+    "Overall Health",
+    f"{overall_health:.1f}%"
+)
+
+d2.metric(
+    "Failure Risk",
+    f"{risk_index:.1f}%"
+)
+
+d3.metric(
+    "Camera Result",
+    camera_result
+)
+
+d4.metric(
+    "Damage Severity",
+    f"{damage_severity:.1f}%"
+)
+
+
+# =========================================================
+# DETAILED DIAGNOSIS
+# =========================================================
+
+st.subheader("🔍 Diagnosis Summary")
+
+if faults:
+
+    for fault in faults:
+        st.write(f"⚠️ {fault}")
+
+else:
+
+    st.write(
+        "✅ No significant abnormal fault indicators detected."
+    )
+
+
+st.info(
+    f"""
+    **Conveyor Status:** {diagnosis_status}
+
+    **Overall Conveyor Health:** {overall_health:.1f}%
+
+    **Failure-Risk Index:** {risk_index:.1f}%
+
+    **Camera Detection:** {camera_result}
+
+    **Belt Direction:** {camera_direction}
+
+    **Visual Deviation:** {camera_deviation:.1f}%
+
+    **Damage Severity:** {damage_severity:.1f}% — {damage_level}
+
+    **Recommended Action:** Review the maintenance recommendations
+    above and inspect the affected conveyor components if abnormal
+    indicators persist.
+    """
+)
+
+# =========================================================
+# SYSTEM STATUS
+# =========================================================
+
+st.header("⚙️ SYSTEM STATUS")
+
+s1, s2, s3, s4 = st.columns(4)
+
+s1.metric(
+    "Camera",
+    "ONLINE"
+)
+
+s2.metric(
+    "Sensor Fusion",
+    "ACTIVE"
+)
+
+s3.metric(
+    "FFT Analysis",
+    "ACTIVE"
+)
+
+s4.metric(
+    "Predictive Assessment",
+    "ACTIVE"
+)
+
+
+# =========================================================
+# TECHNICAL METHODOLOGY
+# =========================================================
+
+st.header("🧪 Technical Methodology")
+
+with st.expander(
+    "View technical implementation"
+):
+
+    st.markdown(
+        """
+        ### Data Acquisition
+
+        The prototype uses four simulated physical monitoring channels controlled directly from the live input sliders:
+
+        - Vibration
+        - RPM
+        - Motor Current
+        - Load Cell
+
+        An overhead camera channel is additionally simulated for belt
+        tracking and lateral displacement detection.
+
+        ### Signal Processing
+
+        Vibration data is generated as a time-domain signal containing
+        periodic components and noise. RMS analysis estimates vibration
+        magnitude, while FFT transforms the signal into the frequency
+        domain to identify dominant frequency components.
+
+        ### Sensor Health
+
+        Individual health scores are calculated from deviation from
+        predefined operating references.
+
+        The sensor health score uses:
+
+        - Vibration = 35%
+        - RPM = 20%
+        - Motor Current = 25%
+        - Load = 20%
+
+        ### Multimodal Fusion
+
+        The final conveyor health combines:
+
+        - Physical sensor health = 80%
+        - Camera visual health = 20%
+
+        This produces a single simulated Conveyor Health Score.
+
+        ### Camera Misalignment
+
+        The simulated camera estimates lateral belt displacement relative
+        to a calibrated reference centerline.
+
+        - ≤10% deviation → NORMAL
+        - >10% to 20% → WARNING
+        - >20% → CRITICAL
+
+        ### Predictive Assessment
+
+        The prototype converts the fused health score into a simulated
+        Failure-Risk Index:
+
+        **Failure Risk = 100 − Overall Health**
+
+        Historical field data would be required to calibrate this into
+        a statistically validated probability of failure.
+
+        ### Fault Diagnosis
+
+        Multiple abnormal indicators are combined to identify possible
+        conditions such as:
+
+        - Bearing / idler degradation
+        - Belt slip
+        - Motor overload
+        - Belt misalignment
+        - Joint / belt damage
+        """
+    )
+
+
+# =========================================================
+# MECHANICAL INNOVATION
+# =========================================================
+
+st.header("🔩 Mechanical Innovation")
+
+with st.expander(
+    "View static-shaft idler concept"
+):
+
+    st.markdown(
+        """
+        ### Modified Static-Shaft Idler Roller
+
+        Our proposed mechanical modification uses a **hollow rotating
+        roller shell around a fixed internal shaft**.
+
+        The roller shell rotates with the conveyor belt while the internal
+        shaft remains stationary.
+
+        Bearings support the rotating roller around the fixed shaft.
+
+        A compact sensor cavity is provided near the bearing region for
+        vibration measurement.
+
+        Sensor wiring can be routed through the stationary shaft toward
+        the ESP32 controller.
+
+        ### Key Advantages
+
+        - No slip rings
+        - No rotating electrical connection
+        - No moving sensor wires
+        - Sensor positioned close to the idler/bearing source
+        - Retrofit-oriented concept
+        - Low-cost condition monitoring architecture
+
+        The overhead camera provides a separate visual channel for belt
+        tracking and misalignment detection.
+        """
+    )
+
+
+# =========================================================
+# IMPORTANT DISCLAIMER
+# =========================================================
+
+st.warning(
+    """
+    **Prototype / Simulation Disclaimer**
+
+    This application is a simulation-based proof of concept for SIH.
+    Sensor values, vibration signals, camera frames and camera
+    misalignment measurements are simulated.
+
+    The camera module demonstrates the intended visual-detection workflow;
+    it is not claiming real-time AI/YOLO/OpenCV detection in this version.
+
+    The Failure-Risk Index is a simulated engineering indicator and is
+    not a statistically validated probability of conveyor failure.
+
+    Field deployment would require real sensor data, calibrated thresholds,
+    historical failure datasets, industrial validation and integration
+    with the actual conveyor control/maintenance system.
+    """
+)
