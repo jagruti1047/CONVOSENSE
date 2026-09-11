@@ -154,33 +154,124 @@ def status_color(status):
 # =========================================================
 
 def get_camera_deviation():
-    """Generate an independent simulated camera tracking measurement."""
-    # Smooth, bounded belt-centerline movement for the 3-second camera refresh.
-    sequence = [0, 2, -3, 4, -2, 1, 5, -4, 3, -1, 0, 2, -2, 1]
+    """
+    Simulated vertical belt-tracking measurement.
+
+    IMPORTANT:
+    The CENTERLINE is the fixed reference.
+
+    Positive deviation  = belt moves UPWARD from centerline
+    Negative deviation  = belt moves DOWNWARD from centerline
+    Zero deviation      = belt remains CENTERED
+
+    The absolute deviation determines the severity:
+
+        0% to 10%       -> NORMAL
+        >10% to 20%     -> WARNING
+        >20%            -> CRITICAL
+
+    Both upward and downward movement are treated as
+    misalignment when the deviation exceeds the warning threshold.
+    """
+
+    # -----------------------------------------------------
+    # TEST CASE SEQUENCE
+    # -----------------------------------------------------
+    #
+    # 0      = Centered / Normal
+    # +5     = Small upward movement / Normal
+    # -5     = Small downward movement / Normal
+    # +10    = Boundary / Normal
+    # -10    = Boundary / Normal
+    # +12    = Upward misalignment / WARNING
+    # -12    = Downward misalignment / WARNING
+    # +15    = Upward misalignment / WARNING
+    # -15    = Downward misalignment / WARNING
+    # +20    = Boundary / WARNING
+    # -20    = Boundary / WARNING
+    # +23    = Severe upward misalignment / CRITICAL
+    # -23    = Severe downward misalignment / CRITICAL
+    # +30    = Severe upward misalignment / CRITICAL
+    # -30    = Severe downward misalignment / CRITICAL
+    #
+    # This allows the dashboard to visibly demonstrate
+    # every possible camera condition.
+
+    sequence = [
+        0,
+        5,
+        -5,
+        10,
+        -10,
+        12,
+        -12,
+        15,
+        -15,
+        20,
+        -20,
+        23,
+        -23,
+        30,
+        -30,
+        4,
+        -4,
+        0
+    ]
+
     index = st.session_state.camera_count % len(sequence)
+
     return sequence[index]
 
 
 def camera_classification(deviation):
 
+    # -----------------------------------------------------
+    # ABSOLUTE DEVIATION
+    # -----------------------------------------------------
+    #
+    # The magnitude determines whether the belt is
+    # normal, warning or critical.
+    #
+    # Direction is handled separately below.
+
     abs_dev = abs(deviation)
 
     if abs_dev <= CAMERA_WARNING:
         classification = "NORMAL"
+
     elif abs_dev <= CAMERA_CRITICAL:
         classification = "WARNING"
+
     else:
         classification = "CRITICAL"
 
+    # -----------------------------------------------------
+    # VERTICAL MISALIGNMENT DIRECTION
+    # -----------------------------------------------------
+    #
+    # Centerline = reference
+    #
+    # Positive = upward
+    # Negative = downward
+    #
+    # Small movement around centerline is considered centered.
+
     if deviation > 3:
-        direction = "RIGHT"
+        direction = "UPWARD"
+
     elif deviation < -3:
-        direction = "LEFT"
+        direction = "DOWNWARD"
+
     else:
         direction = "CENTERED"
 
+    # -----------------------------------------------------
+    # VISUAL HEALTH
+    # -----------------------------------------------------
+
     if classification == "NORMAL":
         visual_health = 100 - abs_dev * 1.5
+
     else:
         visual_health = 100 - abs_dev * 2.0
 
@@ -255,14 +346,33 @@ def create_moving_conveyor_frame(deviation, capture_number):
 
     base_center_x = width / 2
 
-    belt_shift = deviation * 6
+    # -----------------------------------------------------
+    # REFERENCE VERTICAL POSITION
+    # -----------------------------------------------------
 
-    belt_center_x = base_center_x + belt_shift
+    # THIS IS THE FIXED CENTERLINE REFERENCE.
 
-    belt_left = belt_center_x - belt_width / 2
-    belt_bottom = 160
+    base_center_y = 310
 
-    # Belt body
+    # -----------------------------------------------------
+    # VERTICAL BELT SHIFT
+    # -----------------------------------------------------
+
+    # Positive deviation = upward
+    # Negative deviation = downward
+
+    belt_shift_y = deviation * 6
+
+    belt_center_y = base_center_y + belt_shift_y
+
+    belt_left = base_center_x - belt_width / 2
+
+    belt_bottom = belt_center_y - belt_height / 2
+
+    # -----------------------------------------------------
+    # BELT BODY
+    # -----------------------------------------------------
+
     ax.add_patch(
         plt.Rectangle(
             (belt_left, belt_bottom),
@@ -346,6 +456,10 @@ def create_moving_conveyor_frame(deviation, capture_number):
             belt_bottom + belt_height - 30
         )
 
+        # Material continues moving FORWARD horizontally.
+        # This movement is normal and is not treated as
+        # vertical belt misalignment.
+
         moving_x = (
             x +
             (motion * 1.8) % (belt_width - 100)
@@ -364,14 +478,27 @@ def create_moving_conveyor_frame(deviation, capture_number):
         )
 
     # -----------------------------------------------------
-    # REFERENCE CENTERLINE
+    # REFERENCE HORIZONTAL ALIGNMENT LINE
     # -----------------------------------------------------
 
-    reference_x = base_center_x
+    # FIXED CENTERLINE.
+    #
+    # This line NEVER moves.
+    #
+    # The belt centerline moves relative to this line.
+    #
+    # Therefore:
+    #
+    # Reference line = expected belt center
+    # Detected line  = actual belt center
+    #
+    # Distance between them = vertical deviation.
+
+    reference_y = base_center_y
 
     ax.plot(
-        [reference_x, reference_x],
-        [120, 500],
+        [belt_left - 100, belt_left + belt_width + 100],
+        [reference_y, reference_y],
         linestyle="--",
         linewidth=3,
         label="Reference Centerline"
@@ -381,35 +508,44 @@ def create_moving_conveyor_frame(deviation, capture_number):
     # DETECTED BELT CENTERLINE
     # -----------------------------------------------------
 
-    detected_x = belt_center_x
+    detected_y = belt_center_y
 
     ax.plot(
-        [detected_x, detected_x],
-        [120, 500],
+        [belt_left - 100, belt_left + belt_width + 100],
+        [detected_y, detected_y],
         linestyle="-",
         linewidth=4,
         label="Detected Belt Centerline"
     )
 
     # -----------------------------------------------------
-    # DEVIATION ARROW
+    # VERTICAL DEVIATION ARROW
     # -----------------------------------------------------
 
     ax.annotate(
         "",
-        xy=(detected_x, 540),
-        xytext=(reference_x, 540),
+        xy=(base_center_x + 260, detected_y),
+        xytext=(base_center_x + 260, reference_y),
         arrowprops=dict(
             arrowstyle="<->",
             linewidth=3
         )
     )
 
+    # -----------------------------------------------------
+    # DEVIATION LABEL
+    # -----------------------------------------------------
+
+    label_y = (
+        reference_y + detected_y
+    ) / 2
+
     ax.text(
-        (reference_x + detected_x) / 2,
-        550,
-        f"Deviation = {abs(deviation):.1f}%",
-        ha="center",
+        base_center_x + 290,
+        label_y,
+        f"Vertical Deviation = {abs(deviation):.1f}%",
+        ha="left",
+        va="center",
         fontsize=12,
         fontweight="bold"
     )
@@ -421,8 +557,11 @@ def create_moving_conveyor_frame(deviation, capture_number):
     zone_width = 420
     zone_height = 230
 
+    # The inspection zone remains referenced to the original
+    # conveyor alignment so vertical movement can be observed.
+
     zone_left = base_center_x - zone_width / 2
-    zone_bottom = 195
+    zone_bottom = base_center_y - zone_height / 2
 
     ax.add_patch(
         plt.Rectangle(
@@ -546,6 +685,7 @@ def create_moving_conveyor_frame(deviation, capture_number):
 
 st.sidebar.header("📡 Live Sensor Controls")
 
+
 # =========================================================
 # SENSOR INPUTS
 # =========================================================
@@ -584,7 +724,9 @@ manual_load = st.sidebar.slider(
     1.0
 )
 
+
 if st.sidebar.button("🔄 Clear History"):
+
     st.session_state.camera_history = []
     st.session_state.sensor_history = []
     st.session_state.camera_count = 0
@@ -594,9 +736,6 @@ if st.sidebar.button("🔄 Clear History"):
 # =========================================================
 # LIVE SENSOR VALUES
 # =========================================================
-
-# The dashboard uses the values entered in the sidebar directly.
-# There is no live_inputs override.
 
 vibration = manual_vibration
 rpm = manual_rpm
@@ -647,7 +786,7 @@ def live_camera_module():
     # Motion update
     st.session_state.motion_offset += 55
 
-    # Get simulated camera deviation
+    # Get simulated vertical camera deviation
     deviation = get_camera_deviation()
 
     classification, direction, visual_health = camera_classification(
@@ -667,7 +806,7 @@ def live_camera_module():
     history_entry = {
         "Capture": capture_number,
         "Time": timestamp,
-        "Deviation (%)": round(abs(deviation), 1),
+        "Vertical Deviation (%)": round(abs(deviation), 1),
         "Direction": direction,
         "Visual Health (%)": round(visual_health, 1),
         "Result": classification
@@ -694,21 +833,23 @@ def live_camera_module():
     plt.close(fig)
 
     st.caption(
-        "Simulated overhead camera inspection — belt motion and "
-        "visual detection are simulated. Automatic frame capture "
-        "occurs every 3 seconds."
+        "Simulated overhead camera inspection — the fixed centerline "
+        "is used as the alignment reference. Forward belt movement is "
+        "treated as normal. Vertical displacement in either direction "
+        "is monitored as potential misalignment. Automatic frame "
+        "capture occurs every 3 seconds."
     )
 
     # -----------------------------------------------------
     # CAMERA METRICS
     # -----------------------------------------------------
 
-    st.subheader("3️⃣ 📐 BELT MISALIGNMENT / CENTERLINE TRACING")
+    st.subheader("3️⃣ 📐 VERTICAL BELT ALIGNMENT / CENTERLINE TRACING")
 
     c1, c2, c3, c4 = st.columns(4)
 
     c1.metric(
-        "Detected Deviation",
+        "Detected Vertical Deviation",
         f"{abs(deviation):.1f}%"
     )
 
@@ -728,6 +869,35 @@ def live_camera_module():
     )
 
     # -----------------------------------------------------
+    # ALIGNMENT STATUS
+    # -----------------------------------------------------
+
+    st.subheader("📏 BELT ALIGNMENT STATUS")
+
+    if abs(deviation) <= CAMERA_WARNING:
+
+        st.success(
+            f"🟢 CENTERED / NORMAL — Belt centerline is within the "
+            f"acceptable alignment range. Deviation = {abs(deviation):.1f}%"
+        )
+
+    elif abs(deviation) <= CAMERA_CRITICAL:
+
+        st.warning(
+            f"🟠 MISALIGNMENT WARNING — Belt has shifted "
+            f"{direction.lower()} from the reference centerline. "
+            f"Deviation = {abs(deviation):.1f}%"
+        )
+
+    else:
+
+        st.error(
+            f"🔴 CRITICAL MISALIGNMENT — Severe belt displacement detected "
+            f"{direction.lower()} from the reference centerline. "
+            f"Deviation = {abs(deviation):.1f}%"
+        )
+
+    # -----------------------------------------------------
     # CAMERA RESULT
     # -----------------------------------------------------
 
@@ -736,24 +906,24 @@ def live_camera_module():
     if classification == "NORMAL":
 
         st.success(
-            f"🟢 NORMAL — Belt tracking within acceptable range. "
-            f"Deviation = {abs(deviation):.1f}%"
+            f"🟢 NORMAL — Belt remains within acceptable vertical "
+            f"alignment. Vertical deviation = {abs(deviation):.1f}%"
         )
 
     elif classification == "WARNING":
 
         st.warning(
-            f"🟠 WARNING — Belt tracking deviation detected. "
+            f"🟠 WARNING — Vertical belt displacement detected. "
             f"Direction = {direction}, "
-            f"Deviation = {abs(deviation):.1f}%"
+            f"Vertical deviation = {abs(deviation):.1f}%"
         )
 
     else:
 
         st.error(
-            f"🔴 CRITICAL — Severe belt misalignment detected. "
+            f"🔴 CRITICAL — Severe vertical belt misalignment detected. "
             f"Direction = {direction}, "
-            f"Deviation = {abs(deviation):.1f}%"
+            f"Vertical deviation = {abs(deviation):.1f}%"
         )
 
     # -----------------------------------------------------
@@ -801,7 +971,7 @@ if st.session_state.camera_history:
     ]
 
     camera_deviation = latest_camera[
-        "Deviation (%)"
+        "Vertical Deviation (%)"
     ]
 
 else:
@@ -818,7 +988,9 @@ else:
 
 st.header("7️⃣ 📊 MONITORING RESULTS")
 
-st.caption("Every metric below is recalculated directly from the current live sensor inputs.")
+st.caption(
+    "Every metric below is recalculated directly from the current live sensor inputs."
+)
 
 load_utilization = (
     load / NORMAL_LOAD
@@ -844,6 +1016,7 @@ overall_health = (
 failure_risk = clamp(
     100 - overall_health
 )
+
 
 # Save sensor history
 st.session_state.sensor_history.append(
@@ -904,23 +1077,32 @@ live_flags = []
 
 if vibration > VIBRATION_WARNING:
     live_flags.append("Elevated vibration")
+
 if abs(rpm - NORMAL_RPM) > 100:
     live_flags.append("Significant RPM deviation")
+
 if current > CURRENT_WARNING:
     live_flags.append("High motor current")
+
 if load > LOAD_WARNING:
     live_flags.append("High conveyor load")
+
 if camera_result in ["WARNING", "CRITICAL"]:
-    live_flags.append("Visual belt tracking deviation")
+    live_flags.append("Vertical belt tracking deviation")
+
 
 if not live_flags:
+
     st.success(
         "🟢 LIVE CONDITION: NORMAL — Current sensor values and camera tracking "
         "are within the simulated acceptable range."
     )
+
 else:
+
     st.warning(
-        "⚠️ LIVE CONDITION: ABNORMAL — " + ", ".join(live_flags) +
+        "⚠️ LIVE CONDITION: ABNORMAL — " +
+        ", ".join(live_flags) +
         ". The downstream health, risk, fault and maintenance results "
         "have been recalculated from the current inputs."
     )
@@ -952,14 +1134,26 @@ noise = rng.normal(
 )
 
 
-# The waveform changes with the entered vibration value.
-# Higher vibration produces a larger signal amplitude; a small RPM-linked
-# component keeps the simulated signal responsive to another live input.
-rpm_frequency = max(5.0, rpm / 60.0)
+rpm_frequency = max(
+    5.0,
+    rpm / 60.0
+)
+
 signal = (
     vibration
-    + (0.18 * vibration) * np.sin(2 * np.pi * rpm_frequency * t)
-    + (0.08 * vibration) * np.sin(2 * np.pi * 2 * rpm_frequency * t)
+    + (0.18 * vibration) *
+    np.sin(
+        2 * np.pi *
+        rpm_frequency *
+        t
+    )
+    + (0.08 * vibration) *
+    np.sin(
+        2 * np.pi *
+        2 *
+        rpm_frequency *
+        t
+    )
     + noise
 )
 
@@ -1331,6 +1525,7 @@ st.progress(
     int(overall_health)
 )
 
+
 # Fusion contribution
 
 col1, col2 = st.columns(2)
@@ -1482,8 +1677,10 @@ st.header("1️⃣5️⃣ 🩺 BELT / JOINT DAMAGE SEVERITY INDEX")
 # Normalize sensor abnormality
 
 vibration_severity = clamp(
-    ((vibration - NORMAL_VIBRATION) /
-     (10 - NORMAL_VIBRATION)) * 100
+    (
+        (vibration - NORMAL_VIBRATION) /
+        (10 - NORMAL_VIBRATION)
+    ) * 100
 )
 
 rpm_severity = clamp(
@@ -1492,17 +1689,22 @@ rpm_severity = clamp(
 )
 
 current_severity = clamp(
-    ((current - NORMAL_CURRENT) /
-     (20 - NORMAL_CURRENT)) * 100
+    (
+        (current - NORMAL_CURRENT) /
+        (20 - NORMAL_CURRENT)
+    ) * 100
 )
 
 load_severity = clamp(
-    ((load - NORMAL_LOAD) /
-     NORMAL_LOAD) * 100
+    (
+        (load - NORMAL_LOAD) /
+        NORMAL_LOAD
+    ) * 100
 )
 
 camera_severity = clamp(
-    camera_deviation / CAMERA_CRITICAL * 100
+    camera_deviation /
+    CAMERA_CRITICAL * 100
 )
 
 damage_severity = (
@@ -1566,33 +1768,44 @@ st.header("1️⃣6️⃣ 🚨 FAULT DETECTION")
 faults = []
 
 if vibration > VIBRATION_WARNING:
+
     faults.append(
         "Elevated vibration — possible idler/bearing/mechanical abnormality"
     )
 
+
 if abs(rpm - NORMAL_RPM) > 100:
+
     faults.append(
         "RPM deviation — possible belt slip, drive or speed abnormality"
     )
 
+
 if current > CURRENT_WARNING:
+
     faults.append(
         "High motor current — possible overload or increased mechanical resistance"
     )
 
+
 if load > LOAD_WARNING:
+
     faults.append(
         "High conveyor load — increased loading condition"
     )
 
+
 if camera_result == "WARNING":
+
     faults.append(
-        f"Visual belt misalignment warning — belt shifted {camera_direction}"
+        f"Visual vertical belt misalignment warning — belt shifted {camera_direction}"
     )
 
+
 if camera_result == "CRITICAL":
+
     faults.append(
-        f"Critical visual belt misalignment — severe shift {camera_direction}"
+        f"Critical visual vertical belt misalignment — severe shift {camera_direction}"
     )
 
 
@@ -1676,14 +1889,11 @@ for i, recommendation in enumerate(
 # FINAL DIAGNOSIS
 # =========================================================
 
-# =========================================================
-# FINAL DIAGNOSIS
-# =========================================================
-
 st.header("1️⃣8️⃣ 📝 FINAL DIAGNOSIS")
 
 
 # Determine final condition
+
 if overall_health >= 80:
 
     diagnosis_status = "NORMAL"
@@ -1783,7 +1993,10 @@ st.subheader("🔍 Diagnosis Summary")
 if faults:
 
     for fault in faults:
-        st.write(f"⚠️ {fault}")
+
+        st.write(
+            f"⚠️ {fault}"
+        )
 
 else:
 
@@ -1804,7 +2017,7 @@ st.info(
 
     **Belt Direction:** {camera_direction}
 
-    **Visual Deviation:** {camera_deviation:.1f}%
+    **Vertical Visual Deviation:** {camera_deviation:.1f}%
 
     **Damage Severity:** {damage_severity:.1f}% — {damage_level}
 
@@ -1813,6 +2026,7 @@ st.info(
     indicators persist.
     """
 )
+
 
 # =========================================================
 # SYSTEM STATUS
@@ -1865,7 +2079,7 @@ with st.expander(
         - Load Cell
 
         An overhead camera channel is additionally simulated for belt
-        tracking and lateral displacement detection.
+        tracking and vertical displacement detection.
 
         ### Signal Processing
 
@@ -1895,14 +2109,29 @@ with st.expander(
 
         This produces a single simulated Conveyor Health Score.
 
-        ### Camera Misalignment
+        ### Camera Vertical Alignment
 
-        The simulated camera estimates lateral belt displacement relative
-        to a calibrated reference centerline.
+        The simulated camera establishes a calibrated horizontal
+        reference centerline.
 
-        - ≤10% deviation → NORMAL
+        The reference centerline remains fixed.
+
+        Normal forward belt movement occurs along the conveyor travel
+        direction and is not considered a misalignment.
+
+        The system monitors the vertical position of the detected belt
+        centerline relative to the fixed reference centerline.
+
+        Both upward and downward displacement are considered for
+        misalignment detection.
+
+        - 0% to 10% vertical deviation → NORMAL
         - >10% to 20% → WARNING
         - >20% → CRITICAL
+
+        Positive displacement indicates upward movement.
+
+        Negative displacement indicates downward movement.
 
         ### Predictive Assessment
 
@@ -1922,7 +2151,7 @@ with st.expander(
         - Bearing / idler degradation
         - Belt slip
         - Motor overload
-        - Belt misalignment
+        - Vertical belt misalignment
         - Joint / belt damage
         """
     )
@@ -1966,7 +2195,7 @@ with st.expander(
         - Low-cost condition monitoring architecture
 
         The overhead camera provides a separate visual channel for belt
-        tracking and misalignment detection.
+        tracking and vertical misalignment detection.
         """
     )
 
