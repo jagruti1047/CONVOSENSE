@@ -2161,10 +2161,10 @@ with st.expander(
 # MECHANICAL INNOVATION
 # =========================================================
 
-st.header("🔩 Mechanical Innovation")
+st.header("🔩 Key Advantages")
 
 with st.expander(
-    "View static-shaft idler concept"
+    "View advantages"
 ):
 
     st.markdown(
