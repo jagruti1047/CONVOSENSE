@@ -2169,23 +2169,7 @@ with st.expander(
 
     st.markdown(
         """
-        ### Modified Static-Shaft Idler Roller
-
-        Our proposed mechanical modification uses a **hollow rotating
-        roller shell around a fixed internal shaft**.
-
-        The roller shell rotates with the conveyor belt while the internal
-        shaft remains stationary.
-
-        Bearings support the rotating roller around the fixed shaft.
-
-        A compact sensor cavity is provided near the bearing region for
-        vibration measurement.
-
-        Sensor wiring can be routed through the stationary shaft toward
-        the ESP32 controller.
-
-        ### Key Advantages
+    ### Key Advantages
 
         - No slip rings
         - No rotating electrical connection
